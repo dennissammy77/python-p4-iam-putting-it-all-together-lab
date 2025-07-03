@@ -1,87 +1,116 @@
 #!/usr/bin/env python3
 
-from flask import request, session, jsonify
+from flask import request, session
 from flask_restful import Resource
 from sqlalchemy.exc import IntegrityError
-
 from config import app, db, api
 from models import User, Recipe
 
-@app.before_request
-def check_login():
-    if request.endpoint in ('recipes',) and not session.get('user_id'):
-        return {'error': 'Unauthorized'}, 401
 
 class Signup(Resource):
     def post(self):
+        if not request.is_json:
+            return {'errors': ['Request must be JSON']}, 400
+
+        data = request.get_json()
+
+        if not data.get('password'):
+            return {'errors': ['Password is required.']}, 422
+
         try:
-            json = request.get_json()
             user = User(
-                username=json['username'],
-                image_url=json['image_url'],
-                bio=json['bio']
+                username=data.get('username'),
+                image_url=data.get('image_url'),
+                bio=data.get('bio')
             )
-            user.password_hash = json['password']
+            user.password_hash = data.get('password')
+
             db.session.add(user)
             db.session.commit()
+
             session['user_id'] = user.id
-            
+
             return user.to_dict(), 201
-        
-        except Exception as e:
-            return {'error': str(e)}, 422
-        
+
+        except (ValueError, IntegrityError) as e:
+            db.session.rollback()
+            return {'errors': [str(e)]}, 422
+
 
 class CheckSession(Resource):
     def get(self):
-        if id := session.get('user_id'):
-            user = User.query.filter_by(id=id).first()
-            return user.to_dict(), 200
-        return {"error": "Not logged in"}, 401
+        user_id = session.get('user_id')
+
+        if user_id:
+            user = db.session.get(User, user_id)
+            if user:
+                return user.to_dict(), 200
+
+        return {'error': 'Unauthorized'}, 401
+
 
 class Login(Resource):
-    
     def post(self):
-        username, password = request.get_json()['username'], request.get_json()['password']
-        user = User.query.filter_by(username=username).first()
+        if not request.is_json:
+            return {'errors': ['Request must be JSON']}, 400
 
-        if user and user.authenticate(password):
+        data = request.get_json()
+
+        user = User.query.filter_by(username=data.get('username')).first()
+
+        if user and user.authenticate(data.get('password')):
             session['user_id'] = user.id
             return user.to_dict(), 200
-        return {"error": "Invalid username or password"}, 401
-    
-    
+
+        return {'error': 'Invalid username or password'}, 401
+
+
 class Logout(Resource):
-    
     def delete(self):
-        if session.get('user_id'):
-            session['user_id'] = None
-            return {}, 204
-        return {'error': 'No user is currently logged in'}, 401
+        user_id = session.get('user_id')
+        if user_id:
+            session.pop('user_id')
+            return '', 204
+
+        return {'error': 'Unauthorized'}, 401
+
 
 class RecipeIndex(Resource):
-    
-    def post(self):
-        try:
-            user = User.query.filter_by(id=session.get('user_id')).first()
-            json = request.get_json()
-            recipe = Recipe(
-                title=json['title'],
-                instructions=json['instructions'],
-                minutes_to_complete=json['minutes_to_complete'] 
-            )
-            recipe.user=user
-            db.session.add_all([user, recipe])
-            db.session.commit()
-            return recipe.to_dict(), 201
-        except Exception as e:
-            return {"error": str(e)}, 422
-        
-    
     def get(self):
-        user = User.query.filter_by(id = session.get('user_id')).first()
-        return [recipe.to_dict() for recipe in user.recipes], 200
-    
+        user_id = session.get('user_id')
+        if not user_id:
+            return {'error': 'Unauthorized'}, 401
+
+        recipes = Recipe.query.all()
+        return [r.to_dict() for r in recipes], 200
+
+    def post(self):
+        if not request.is_json:
+            return {'errors': ['Request must be JSON']}, 400
+
+        user_id = session.get('user_id')
+        if not user_id:
+            return {'error': 'Unauthorized'}, 401
+
+        data = request.get_json()
+
+        try:
+            recipe = Recipe(
+                title=data.get('title'),
+                instructions=data.get('instructions'),
+                minutes_to_complete=data.get('minutes_to_complete'),
+                user_id=user_id
+            )
+
+            db.session.add(recipe)
+            db.session.commit()
+
+            return recipe.to_dict(), 201
+
+        except ValueError as e:
+            db.session.rollback()
+            return {'errors': [str(e)]}, 422
+
 api.add_resource(Signup, '/signup', endpoint='signup')
 api.add_resource(CheckSession, '/check_session', endpoint='check_session')
 api.add_resource(Login, '/login', endpoint='login')
